@@ -2,7 +2,6 @@
 Master Graph - Orquestrador LangGraph unificado
 Integra MiMo (código), Hyper-Extract (conhecimento) e Web Tools
 """
-
 import os
 
 # Hard cap de turns para evitar loops infinitos e custos excessivos
@@ -32,6 +31,7 @@ from tools.financial_br_bridge import FinancialBridgeBR, get_financial_bridge
 from tools.mcp_brasil_bridge import MCPBrasilDirectBridge, get_mcp_brasil_bridge
 from tools.fallback import with_cascade_fallback, safe_execute
 from tools.cache import web_get, web_set, bridge_get, bridge_set, llm_get, llm_set
+from tools.telemetry import telemetry
 from config import get_api_key, save_api_key
 from core.ontology import get_ontology
 from core.semantic_router import get_semantic_router
@@ -145,6 +145,47 @@ class AgentState(TypedDict):
     turn_count: int  # Contador de turns para hard cap
     agent_sequence: List[str]  # Sequencia multi-passo de bridges
     sequence_index: int  # Indice atual na sequencia
+
+
+# ==========================
+# FALLBACK MAP — bridges com fallback runtime
+# ==========================
+
+FALLBACK_MAP = {
+    "research": ["scraper", "web"],       # RESEARCH falhou -> tenta SCRAPE -> WEB
+    "scraper": ["web"],                   # SCRAPE falhou -> tenta WEB
+    "web": [],                            # WEB sem fallback
+    "finance": [],                        # Finance sem fallback
+    "codex": [],                          # Codex sem fallback
+    "knowledge": [],                      # Knowledge sem fallback
+    "viz": [],                            # Viz sem fallback
+    "reporter": [],                       # Reporter sem fallback
+    "observer": [],                       # Observer sem fallback
+    "vision_scout": [],                   # Vision sem fallback
+    "sheets": [],                         # Sheets sem fallback
+    "dv360": [],                          # DV360 sem fallback
+    "tiktok": [],                         # TikTok sem fallback
+    "mcp_brasil": [],                     # MCP Brasil sem fallback
+}
+
+# Sequencias válidas: bridges que PODEM aparecer juntas numa multi-passo
+# Bloqueia sequencias sem sentido como CODE-RESEARCH
+VALID_SEQUENCES = {
+    "research": {"viz", "reporter", "knowledge", "web", "scraper"},
+    "scraper": {"viz", "reporter", "knowledge", "research", "web"},
+    "web": {"viz", "reporter", "research", "scraper"},
+    "finance": {"viz", "reporter"},
+    "knowledge": {"viz", "reporter"},
+    "codex": set(),         # Codex nunca combina com outras
+    "viz": {"reporter"},    # Viz so combina com reporter
+    "reporter": set(),      # Reporter nunca tem nada depois
+    "dv360": {"viz", "reporter"},
+    "tiktok": {"viz", "reporter"},
+    "observer": set(),
+    "vision_scout": set(),
+    "sheets": set(),
+    "mcp_brasil": set(),
+}
 
 
 # ==========================
@@ -417,6 +458,19 @@ def planner_node(state: AgentState) -> dict:
         mapped = agent_map.get(part)
         if mapped and mapped not in agent_sequence:
             agent_sequence.append(mapped)
+
+    # VALIDAÇÃO DE SEQUENCIA — impede combinacoes invalidas
+    if len(agent_sequence) > 1:
+        validated = [agent_sequence[0]]
+        for i in range(1, len(agent_sequence)):
+            prev = validated[-1]
+            next_br = agent_sequence[i]
+            allowed = VALID_SEQUENCES.get(prev, set())
+            if next_br in allowed:
+                validated.append(next_br)
+            else:
+                print(f"   ⚠ Sequencia invalida: {prev} -> {next_br}. Removendo {next_br} da sequencia.")
+        agent_sequence = validated
 
     print(f"   Sequencia bridges: {agent_sequence if agent_sequence else 'simples'}")
 
@@ -1761,7 +1815,7 @@ def integrator_node(state: AgentState) -> dict:
     else:
         print(f"   ✓ Dados validados contra ontologia")
 
-    if has_artifacts or has_messages or iteration >= 1:
+    if has_artifacts or has_messages or iteration >= 1 or state.get("error"):
         # ====================================================================
         # VERIFICA SE TEM PROXIMO PASSO NA SEQUENCIA MULTI-PASSO
         # ====================================================================
@@ -1769,10 +1823,22 @@ def integrator_node(state: AgentState) -> dict:
         sequence_index = state.get("sequence_index", 0)
         next_seq_index = sequence_index + 1
 
+        last_error = state.get("error")
+        bridge_falhou = bool(last_error) or not state.get("success", True)
+
         if agent_sequence and next_seq_index < len(agent_sequence):
             # Ainda tem bridges para executar na sequencia
             next_agent = agent_sequence[next_seq_index]
-            print(f"   [MULTI-PASSO] Avancando para bridge {next_seq_index+1}/{len(agent_sequence)}: {next_agent}")
+
+            if bridge_falhou:
+                print(f"   [MULTI-PASSO] Bridge {last_agent} FALHOU. Pulando para {next_agent} "
+                      f"({next_seq_index+1}/{len(agent_sequence)})")
+                # Limpa o erro ao pular
+                error_msg = f"Bridge {last_agent} falhou: {last_error}. Pulando para {next_agent}."
+            else:
+                print(f"   [MULTI-PASSO] Avancando para bridge {next_seq_index+1}/{len(agent_sequence)}: {next_agent}")
+                error_msg = None
+
             print(f"   Artifacts ate agora: {len(artifacts)}")
 
             # Auto-skill hook (parcial)
@@ -1795,16 +1861,17 @@ def integrator_node(state: AgentState) -> dict:
 
             return {
                 "completed": False,
-                "success": True,
+                "success": not bridge_falhou,
                 "current_agent": next_agent,
                 "sequence_index": next_seq_index,
+                "error": error_msg,  # None se OK, mensagem se pulou falha
                 "iteration": iteration + 1,
                 "context": {
                     **context,
-                    "summary": f"Bridge {last_agent} concluida. Proximo: {next_agent}",
+                    "summary": f"Bridge {last_agent} {'FALHOU' if bridge_falhou else 'OK'}. Proximo: {next_agent}",
                     "validation_errors": validation_errors if validation_errors else None,
                 },
-                "messages": [HumanMessage(content=f"INTEGRATOR: Bridge {last_agent} OK. Proximo: {next_agent}")]
+                "messages": [HumanMessage(content=f"INTEGRATOR: Bridge {last_agent} {'FALHOU' if bridge_falhou else 'OK'}. Proximo: {next_agent}")]
             }
 
         # ====================================================================
@@ -1867,36 +1934,97 @@ def integrator_node(state: AgentState) -> dict:
 
 
 def router_node(state: AgentState):
-    """Roteia para o proximo no baseado no estado."""
-    print(f"   [ROUTER] completed={state.get('completed')}, last={state.get('last_agent','')}, iter={state.get('iteration',0)}")
+    """Roteia para o proximo no baseado no estado.
+    Implementa:
+    1. Fallback cascade runtime: se bridge falhou, tenta fallback automaticamente
+    2. Skip de bridge falha: se nao tem fallback, pula e continua sequencia
+    3. Sequencia multi-passo avanca ate o fim normalmente
+    """
+    last = state.get("last_agent", "")
+    error = state.get("error")
+    success = state.get("success", True)
+    has_failed = bool(error) or not success
+    agent_sequence = state.get("agent_sequence", [])
+    sequence_index = state.get("sequence_index", 0)
+    iteration = state.get("iteration", 0)
+    completed = state.get("completed", False)
 
-    if state.get("completed", False):
+    print(f"   [ROUTER] completed={completed} last={last} iter={iteration} "
+          f"error={bool(error)} seq={sequence_index}/{len(agent_sequence)}")
+
+    # ============================================================
+    # CONDIÇÕES DE PARADA
+    # ============================================================
+    if completed:
         print("   [ROUTER] -> END (completed)")
         return "end"
 
-    iteration = state.get("iteration", 0)
     if iteration >= state.get("max_iterations", 3):
         print(f"   [ROUTER] -> END (max iter {iteration})")
         return "end"
 
-    # Verifica se ainda tem sequencia pendente — nao encerra mesmo com artifacts
-    agent_sequence = state.get("agent_sequence", [])
-    sequence_index = state.get("sequence_index", 0)
+    # ============================================================
+    # FALLBACK CASCADE EM RUNTIME
+    # Se a bridge falhou E tem fallback configurado, tenta fallback
+    # ============================================================
+    if has_failed and last in FALLBACK_MAP and FALLBACK_MAP[last]:
+        fallbacks = FALLBACK_MAP[last]
+        print(f"   [ROUTER] Bridge {last} falhou. Tentando fallback: {fallbacks}")
+
+        # Tenta o primeiro fallback disponivel que nao esta na sequencia
+        for fb in fallbacks:
+            if fb not in agent_sequence:
+                print(f"   [ROUTER] Fallback: {last} -> {fb}")
+                # Nao incrementa sequence_index — o fallback substitui a bridge atual
+                return {
+                    "current_agent": fb,
+                    "last_agent": "router",
+                    "error": None,  # Limpa erro — vamos tentar de novo
+                    "success": True,
+                    "sequence_index": sequence_index,  # Mesmo indice
+                    "agent_sequence": agent_sequence,
+                    "iteration": iteration + 1,
+                    "messages": state.get("messages", []) + [
+                        HumanMessage(content=f"ROUTER: {last} falhou. Tentando fallback {fb}.")
+                    ],
+                }
+
+        # Esgotou fallbacks — segue adiante sem esta bridge
+        print(f"   [ROUTER] Fallbacks esgotados para {last}. Seguindo sem ela.")
+
+    # ============================================================
+    # SKIP DE BRIDGE FALHA NA SEQUENCIA
+    # Se a bridge falhou e estamos em multi-passo, pula e vai pro integrator
+    # O integrator decide se avanca ou encerra
+    # ============================================================
+    if has_failed and agent_sequence and (sequence_index + 1) < len(agent_sequence):
+        print(f"   [ROUTER] Bridge {last} falhou em multi-passo. Pulando para proxima...")
+        # Router retorna routing string — integrator vai tratar o skip
+        return "integrator"
+
+    # ============================================================
+    # SEQUENCIA PENDENTE — nao encerra mesmo com artifacts
+    # ============================================================
     if agent_sequence and (sequence_index + 1) < len(agent_sequence):
         print(f"   [ROUTER] Sequencia pendente: {sequence_index+1}/{len(agent_sequence)} - continuando...")
-    elif len(state.get("artifacts", [])) > 0:
+    elif len(state.get("artifacts", [])) > 0 and not has_failed:
         print("   [ROUTER] -> END (has artifacts)")
         return "end"
 
-    last = state.get("last_agent", "")
-
-    if last in ["codex", "knowledge", "web", "scraper", "viz", "observer", "scraper_fallback", "vision_scout", "sheets", "reporter", "dv360", "tiktok", "research", "finance", "mcp_brasil"]:
+    # ============================================================
+    # ROTEAMENTO PADRAO
+    # ============================================================
+    if last in ["codex", "knowledge", "web", "scraper", "viz", "observer",
+                "scraper_fallback", "vision_scout", "sheets", "reporter",
+                "dv360", "tiktok", "research", "finance", "mcp_brasil"]:
         print(f"   [ROUTER] -> integrator (from {last})")
         return "integrator"
 
     if last == "integrator":
         current = state.get("current_agent", "codex")
-        if current in ["codex", "knowledge", "web", "scraper", "viz", "observer", "scraper_fallback", "vision_scout", "sheets", "reporter", "dv360", "tiktok", "research", "finance", "mcp_brasil"]:
+        if current in ["codex", "knowledge", "web", "scraper", "viz", "observer",
+                        "scraper_fallback", "vision_scout", "sheets", "reporter",
+                        "dv360", "tiktok", "research", "finance", "mcp_brasil"]:
             print(f"   [ROUTER] -> {current} (from integrator)")
             return current
         print("   [ROUTER] -> integrator (fallback)")
@@ -1918,23 +2046,48 @@ def build_master_graph() -> StateGraph:
 
     workflow = StateGraph(AgentState)
 
+    # Mapa de bridge -> operação para telemetria
+    _TELEMETRY_OPS = {
+        "codex": "codex_node",
+        "knowledge": "knowledge_node",
+        "web": "web_node",
+        "scraper": "scraper_node",
+        "viz": "viz_node",
+        "observer": "observer_node",
+        "scraper_fallback": "scraper_fallback_node",
+        "vision_scout": "vision_scout_node",
+        "sheets": "sheets_node",
+        "reporter": "reporter_node",
+        "dv360": "dv360_node",
+        "tiktok": "tiktok_node",
+        "research": "research_node",
+        "finance": "finance_node",
+        "mcp_brasil": "mcp_brasil_node",
+    }
+
+    # Wrapper de telemetria para nodes de bridge
+    def _wrap_node(node_fn, bridge_name):
+        def wrapped(state):
+            with telemetry.span(bridge_name, _TELEMETRY_OPS.get(bridge_name, f"{bridge_name}_node")):
+                return node_fn(state)
+        wrapped.__name__ = node_fn.__name__
+        return wrapped
+
+    # Adiciona nodes com telemetria
     workflow.add_node("planner", planner_node)
-    workflow.add_node("codex", codex_node)
-    workflow.add_node("knowledge", knowledge_node)
-    workflow.add_node("web", web_node)
-    workflow.add_node("scraper", scraper_node)
-    workflow.add_node("viz", viz_node)
-    workflow.add_node("observer", observer_node)
-    workflow.add_node("scraper_fallback", scraper_fallback_node)
-    workflow.add_node("vision_scout", vision_scout_node)
-    workflow.add_node("sheets", sheets_node)
-    workflow.add_node("reporter", reporter_node)
-    workflow.add_node("dv360", dv360_node)
-    workflow.add_node("tiktok", tiktok_node)
-    workflow.add_node("research", research_node)
-    workflow.add_node("finance", finance_node)
-    workflow.add_node("mcp_brasil", mcp_brasil_node)
     workflow.add_node("integrator", integrator_node)
+    for name, fn in [
+        ("codex", codex_node), ("knowledge", knowledge_node),
+        ("web", web_node), ("scraper", scraper_node),
+        ("viz", viz_node), ("observer", observer_node),
+        ("scraper_fallback", scraper_fallback_node),
+        ("vision_scout", vision_scout_node),
+        ("sheets", sheets_node), ("reporter", reporter_node),
+        ("dv360", dv360_node), ("tiktok", tiktok_node),
+        ("research", research_node), ("finance", finance_node),
+        ("mcp_brasil", mcp_brasil_node),
+    ]:
+        workflow.add_node(name, _wrap_node(fn, name))
 
     workflow.set_entry_point("planner")
     # Roteamento pos-planner: segue o current_agent definido pelo planner
