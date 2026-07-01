@@ -1,0 +1,6 @@
+dataset,desc,n_rows,file
+shenzhen,"Dados reais de TV Manufacturing (374 semanas, 5 canais de mídia)",374,shenzhen.csv
+observed,Dados de TV + Search com revenue e profit (156 semanas),156,observed.csv
+meridian_style,"Dados estilo Google Meridian (104 semanas, 4 canais)",104,meridian_style.csv
+pymc_tutorial,"Dados do tutorial PyMC-Marketing (179 semanas, 2 canais, parametros verdadeiros conhecidos)",179,pymc_tutorial.csv
+causalpy_sc,"Dados para Synthetic Control (150 periodos, 10 controles, 4 cenarios de efeito)",150,causalpy_sc.csv

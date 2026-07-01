@@ -1,0 +1,274 @@
+# =============================================================================
+# Hermes Unified — Ontologia Central
+# Define conceitos, relações e constraints semânticas para todas as bridges.
+# A ontologia diz o que as coisas SIGNIFICAM, não apenas que campos existem.
+# =============================================================================
+
+metadata:
+  version: "1.0"
+  created: "2026-06-19"
+  description: "Ontologia do sistema Hermes Unified — 13 bridges, 14 agentes"
+
+# =============================================================================
+# ENTIDADES — Conceitos centrais do domínio
+# =============================================================================
+entities:
+  # --- Mídia e Campanhas ---
+  Campaign:
+    description: "Campanha de marketing digital"
+    attributes:
+      name: { type: string, required: true, description: "Nome da campanha" }
+      platform: { type: string, required: true, enum: [dv360, tiktok, google_ads, meta_ads, linkedin_ads], description: "Plataforma de anúncios" }
+      status: { type: string, enum: [active, paused, completed, draft, archived], default: active }
+      start_date: { type: date }
+      end_date: { type: date }
+      budget: { type: float, constraints: ">= 0" }
+      currency: { type: string, default: "BRL" }
+      objective: { type: string, enum: [awareness, consideration, conversion, retargeting] }
+
+  Metric:
+    description: "Métrica de desempenho de campanha"
+    attributes:
+      name: { type: string, required: true, description: "Nome da métrica" }
+      value: { type: float, required: true }
+      unit: { type: string, description: "Unidade de medida (ex: BRL, %, count)" }
+      period_start: { type: date }
+      period_end: { type: date }
+      source: { type: string, description: "Bridge que forneceu o dado" }
+    constraints:
+      - "CPC deve ser > 0"
+      - "CTR deve estar entre 0 e 100"
+      - "ROAS deve ser >= 0"
+
+  AdSet:
+    description: "Grupo de anúncios dentro de uma campanha"
+    attributes:
+      name: { type: string, required: true }
+      campaign_id: { type: string, required: true }
+      platform: { type: string, enum: [dv360, tiktok, google_ads, meta_ads] }
+      budget: { type: float, constraints: ">= 0" }
+      status: { type: string, enum: [active, paused, completed] }
+
+  # --- Dados e Conhecimento ---
+  Document:
+    description: "Documento processado (PDF, texto, etc.)"
+    attributes:
+      path: { type: string, required: true }
+      type: { type: string, enum: [pdf, html, txt, docx, md] }
+      title: { type: string }
+      source_url: { type: string }
+      processed_at: { type: datetime }
+      total_pages: { type: integer, constraints: ">= 0" }
+
+  KnowledgeGraph:
+    description: "Grafo de conhecimento extraído de documentos"
+    attributes:
+      project_id: { type: string, required: true }
+      total_nodes: { type: integer, constraints: ">= 0" }
+      total_edges: { type: integer, constraints: ">= 0" }
+      source_document: { type: string }
+
+  ResearchTopic:
+    description: "Tópico pesquisado pelo Research Agent (STORM)"
+    attributes:
+      topic: { type: string, required: true }
+      depth: { type: string, enum: [quick, medium, deep], default: quick }
+      mode: { type: string, enum: [fast, storm, hybrid], default: hybrid }
+      status: { type: string, enum: [pending, running, completed, failed], default: pending }
+      sources_count: { type: integer, constraints: ">= 0" }
+      generated_at: { type: datetime }
+
+  Claim:
+    description: "Afirmação extraída de pesquisa com nível de confiança"
+    attributes:
+      text: { type: string, required: true }
+      confidence: { type: float, constraints: "0.0 <= confidence <= 1.0", required: true }
+      source: { type: string, description: "URL ou bridge de origem" }
+      topic: { type: string }
+      verified: { type: boolean, default: false }
+      created_at: { type: datetime }
+      conflicting_claims: { type: list, of: string }
+
+  Source:
+    description: "Fonte de informação referenciada"
+    attributes:
+      url: { type: string, required: true }
+      title: { type: string }
+      domain: { type: string }
+      accessed_at: { type: datetime }
+      relevance_score: { type: float, constraints: "0.0 <= relevance <= 1.0" }
+
+  # --- Relatórios e Visualizações ---
+  Report:
+    description: "Relatório gerado pelo sistema"
+    attributes:
+      title: { type: string, required: true }
+      type: { type: string, enum: [pdf, html, docx, pptx] }
+      sections: { type: integer, constraints: ">= 1" }
+      generated_at: { type: datetime }
+      source_data: { type: string, description: "Quais dados/entidades foram usados" }
+
+  Visualization:
+    description: "Gráfico ou visualização gerada"
+    attributes:
+      title: { type: string }
+      chart_type: { type: string, enum: [bar, line, pie, scatter, area, heatmap, table] }
+      file_path: { type: string }
+      generated_at: { type: datetime }
+
+  # --- Sheets e Dados Estruturados ---
+  Spreadsheet:
+    description: "Planilha de dados"
+    attributes:
+      name: { type: string, required: true }
+      format: { type: string, enum: [json, csv, xlsx], default: json }
+      columns: { type: list, of: string }
+      row_count: { type: integer, constraints: ">= 0" }
+      created_at: { type: datetime }
+
+  # --- Observação e Monitoramento ---
+  Observation:
+    description: "Observação registrada por watchers ou monitoramento"
+    attributes:
+      type: { type: string, enum: [info, warning, error, alert, metric_change] }
+      message: { type: string, required: true }
+      source: { type: string, description: "Watcher ou bridge que gerou" }
+      severity: { type: string, enum: [low, medium, high, critical], default: medium }
+      observed_at: { type: datetime }
+      related_entity: { type: string, description: "Entidade relacionada (ex: nome da campanha)" }
+
+# =============================================================================
+# RELAÇÕES — Conexões tipadas entre entidades
+# =============================================================================
+relationships:
+  Campaign:
+    HAS_METRIC: { target: Metric, cardinality: many, description: "Campanha possui métricas" }
+    HAS_ADSET: { target: AdSet, cardinality: many, description: "Campanha contém grupos de anúncios" }
+    BELONGS_TO_PLATFORM: { target: Metric, description: "Campanha pertence a uma plataforma", via: "platform" }
+
+  AdSet:
+    BELONGS_TO_CAMPAIGN: { target: Campaign, cardinality: one, description: "AdSet pertence a uma campanha" }
+    HAS_METRIC: { target: Metric, cardinality: many }
+
+  Document:
+    EXTRACTED_INTO: { target: KnowledgeGraph, cardinality: one, description: "Documento foi processado em um grafo" }
+    SOURCE_FOR: { target: ResearchTopic, cardinality: many }
+
+  KnowledgeGraph:
+    DERIVED_FROM: { target: Document, cardinality: one }
+    CONTAINS_CLAIM: { target: Claim, cardinality: many }
+
+  ResearchTopic:
+    PRODUCES: { target: Claim, cardinality: many }
+    CITES: { target: Source, cardinality: many }
+    GENERATES: { target: Report, cardinality: one }
+
+  Report:
+    CONTAINS_SECTION: { target: Visualization, cardinality: many }
+    REFERENCES: { target: Claim, cardinality: many }
+    USES_DATA_FROM: { target: Metric, cardinality: many }
+
+  Spreadsheet:
+    EXPORTED_FROM: { target: Metric, cardinality: many }
+    USED_IN: { target: Report, cardinality: many }
+
+  Observation:
+    MONITORS: { target: Campaign, cardinality: one }
+    TRIGGERED_BY: { target: Metric, cardinality: one }
+
+  Claim:
+    CITES_SOURCE: { target: Source, cardinality: many }
+    SUPPORTS: { target: Claim, cardinality: many, description: "Claim que corrobora outra" }
+    CONTRADICTS: { target: Claim, cardinality: many, description: "Claim que contradiz outra" }
+
+# =============================================================================
+# CONSTRAINTS SEMÂNTICAS — Regras de negócio imutáveis
+# =============================================================================
+constraints:
+  # Validações de atributos
+  attribute_validation:
+    - entity: Metric
+      rule: "if name == 'CTR' then value must be between 0 and 100"
+    - entity: Metric
+      rule: "if name == 'CPC' then value must be >= 0"
+    - entity: Metric
+      rule: "if name == 'ROAS' then value must be >= 0"
+    - entity: Campaign
+      rule: "if end_date exists then end_date >= start_date"
+    - entity: Claim
+      rule: "confidence must be between 0.0 and 1.0"
+
+  # Validações de entidade
+  entity_validation:
+    - rule: "Toda Metric deve pertencer a pelo menos uma Campaign"
+    - rule: "Todo Claim deve ter ao menos uma Source"
+    - rule: "Todo Report deve referenciar ao menos um Claim ou Metric"
+    - rule: "Campanhas com budget = 0 não podem ter status = active"
+
+  # Desambiguação semântica
+  disambiguation:
+    - term: "CPC"
+      contexts:
+        dv360: { meaning: "Cost Per Click", unit: "BRL" }
+        tiktok: { meaning: "Cost Per Click", unit: "USD" }
+    - term: "ROAS"
+      contexts:
+        dv360: { meaning: "Return On Ad Spend", formula: "revenue / cost" }
+        tiktok: { meaning: "Return On Ad Spend", formula: "revenue / cost" }
+    - term: "impressions"
+      contexts:
+        dv360: { meaning: "Number of ad impressions served" }
+        tiktok: { meaning: "Number of times video was viewed" }
+    - term: "reach"
+      contexts:
+        dv360: { meaning: "Unique users reached" }
+        tiktok: { meaning: "Unique accounts that saw content" }
+
+# =============================================================================
+# BRIDGE MAPPING — Que entidades cada bridge opera
+# =============================================================================
+bridge_mapping:
+  dv360_bridge:
+    entities: [Campaign, Metric, AdSet]
+    produces: [Metric, Observation]
+    reads: [Campaign]
+  tiktok_bridge:
+    entities: [Campaign, Metric, AdSet]
+    produces: [Metric, Observation]
+    reads: [Campaign]
+  research_bridge:
+    entities: [ResearchTopic, Claim, Source, Report]
+    produces: [Claim, Source, Report]
+    reads: [ResearchTopic]
+  knowledge_bridge:
+    entities: [Document, KnowledgeGraph]
+    produces: [KnowledgeGraph]
+    reads: [Document]
+  reporter_bridge:
+    entities: [Report, Visualization]
+    produces: [Report, Visualization]
+    reads: [Claim, Metric, Source]
+  sheets_bridge:
+    entities: [Spreadsheet]
+    produces: [Spreadsheet]
+    reads: [Metric, Claim]
+  viz_bridge:
+    entities: [Visualization]
+    produces: [Visualization]
+    reads: [Metric, Spreadsheet]
+  observer_bridge:
+    entities: [Observation]
+    produces: [Observation]
+    reads: [Campaign, Metric]
+  web_bridge:
+    entities: [Source]
+    produces: [Source]
+    reads: []
+  scraper_bridge:
+    entities: [Source, Document]
+    produces: [Source, Document]
+    reads: []
+  codex_bridge:
+    entities: []
+    produces: []
+    reads: []
