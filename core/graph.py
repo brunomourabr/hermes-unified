@@ -143,6 +143,8 @@ class AgentState(TypedDict):
     error: Optional[str]
     next_action: Optional[str]
     turn_count: int  # Contador de turns para hard cap
+    agent_sequence: List[str]  # Sequencia multi-passo de bridges
+    sequence_index: int  # Indice atual na sequencia
 
 
 # ==========================
@@ -249,26 +251,67 @@ def classify_task(objective: str) -> str:
         return cached
 
     llm = get_llm()
-    prompt = f"""Classifique a tarefa abaixo em UMA das categorias:
+    prompt = f"""Classifique a tarefa abaixo em UMA das categorias principais.
+Mas para cada categoria, pense: se essa bridge falhar, qual seria o fallback natural?
 
-CODE - Envolve gerar, modificar, refatorar codigo ou executar comandos de terminal
-KNOWLEDGE - Envolve extrair informacoes de documentos, PDFs, ou buscar conhecimento existente
-WEB - Envolve pesquisa na internet, buscar informacoes atuais
-SCRAPE - Envolve extrair conteudo de sites especificos, web scraping, buscar dados de URLs
-VIZ - Envolve criar graficos, visualizacoes, dashboards, charts ou apresentacoes
-OBSERVER - Envolve monitoramento continuo, watchers, checagens periodicas, alerts
-VISION - Envolve analise de imagens, screenshots, extracao de texto de imagens, comparacao visual
-SHEETS - Envolve criar, ler, modificar planilhas, spreadsheets, tabelas organizadas
-REPORT - Envolve gerar relatorios, PDFs, documentacao estruturada, reports
-DV360 - Envolve analise de anuncios no Google Display & Video 360, DV360, campanhas display, video advertising
-RESEARCH - Envolve pesquisar um topico, escrever artigo, gerar conteudo aprofundado com citacoes, research, reportagem
-FINANCE - Envolve dados financeiros, investimentos, acoes, FIIs, Tesouro Direto, Selic, IPCA, CDI, cambio, bolsa de valores, B3, macroeconomia, indicadores economicos
-MCP_BRASIL - Envolve dados publicos brasileiros, cep, cnpj, deputados, eleicoes, ibge, camara, senado, tse, medicamentos, queimadas, licitacoes, diario oficial, compras publicas, sus, dados do governo, dados abertos Brasil, dados do IBGE, dados do BCB, dados eleitorais, dados do TSE, dados do INPE
-MULTI - Envolve multiplas categorias (ex: criar codigo baseado em documentacao)
+CATEGORIAS (com fallback):
+
+RESEARCH (pesquisa aprofundada com citacoes)
+  → Se falhar, tente SCRAPE (extrair de site especifico)
+  → Se ainda falhar, tente WEB (busca simples na web)
+
+SCRAPE (extrair conteudo de sites especificos)
+  → Se falhar, tente WEB (busca simples na web)
+
+KNOWLEDGE (extrair informacoes de PDFs/documentos)
+  → Sem fallback direto (bridge unica)
+
+CODE (gerar/modificar/refatorar codigo)
+  → Sem fallback direto (bridge unica)
+
+VIZ (graficos, dashboards, charts)
+  → Sem fallback direto (bridge unica)
+
+REPORT (relatorios PDF, documentacao estruturada)
+  → Se vier de dados coletados, RODE RESEARCH/SCRAPE primeiro
+
+OBSERVER (monitoramento continuo, watchers)
+  → Sem fallback direto (bridge unica)
+
+VISION (analise de imagens)
+  → Sem fallback direto (bridge unica)
+
+SHEETS (planilhas, tabelas organizadas)
+  → Sem fallback direto (bridge unica)
+
+DV360 (Google Display & Video 360)
+  → Sem fallback direto (bridge unica)
+
+TIKTOK (TikTok Ads)
+  → Sem fallback direto (bridge unica)
+
+FINANCE (dados financeiros, acoes, indicadores)
+  → Sem fallback direto (bridge unica)
+
+MCP_BRASIL (dados publicos brasileiros)
+  → Sem fallback direto (bridge unica)
+
+WEB (busca simples na internet)
+  → Sem fallback direto (bridge unica)
+
+MULTI (envolve multiplas categorias)
+  → Liste as bridges em ordem: ex: RESEARCH-VIZ-REPORT
 
 Tarefa: {objective}
 
-Responda APENAS com o nome da categoria: CODE, KNOWLEDGE, WEB, SCRAPE, VIZ, OBSERVER, VISION, SHEETS, REPORT, DV360, RESEARCH, FINANCE ou MULTI"""
+Responda APENAS com o nome da categoria principal e, se for MULTI, a sequencia separada por virgula.
+Exemplos:
+  "Pesquise sobre IA" -> RESEARCH
+  "Pesquise sobre IA e gere um grafico" -> RESEARCH-VIZ
+  "Crie um relatorio com dados financeiros" -> FINANCE-REPORT
+  "Pesquise MMM e crie um script" -> RESEARCH-CODE
+  "Gere um grafico de vendas" -> VIZ
+  "Crie uma API Flask" -> CODE"""
 
     response = llm.invoke([HumanMessage(content=prompt)])
     result = response.content.strip().upper()
@@ -356,10 +399,31 @@ def planner_node(state: AgentState) -> dict:
     print(f"   Categoria LLM: {category}")
     print(f"   Passos: {len(steps)}")
 
+    # Parseia categoria: pode ser "RESEARCH" simples ou "RESEARCH-VIZ-REPORT" (multi-passo)
+    category_parts = category.replace("-", ",").split(",")
+    category_primary = category_parts[0].strip() if category_parts else "WEB"
+
+    # Se tiver multiplas bridges separadas por virgula/hifen, monta sequencia
+    agent_sequence = []
+    for part in category_parts:
+        part = part.strip()
+        agent_map = {
+            "CODE": "codex", "KNOWLEDGE": "knowledge", "WEB": "web",
+            "SCRAPE": "scraper", "VIZ": "viz", "OBSERVER": "observer",
+            "VISION": "vision_scout", "SHEETS": "sheets", "REPORT": "reporter",
+            "DV360": "dv360", "TIKTOK": "tiktok", "RESEARCH": "research",
+            "FINANCE": "finance", "MCP_BRASIL": "mcp_brasil",
+        }
+        mapped = agent_map.get(part)
+        if mapped and mapped not in agent_sequence:
+            agent_sequence.append(mapped)
+
+    print(f"   Sequencia bridges: {agent_sequence if agent_sequence else 'simples'}")
+
     # ====================================================================
     # PASSO 3: Decide o próximo agente
-    # Usa semantic_router.get_agent_for_query como primário,
-    # com fallback para a classificação LLM quando o router não detectar
+    # Usa semantic_router como primário, fallback para LLM
+    # Se for multi-passo (agent_sequence), usa o primeiro da fila
     # ====================================================================
     semantic_agent = router.get_agent_for_query(state["objective"])
 
@@ -380,25 +444,31 @@ def planner_node(state: AgentState) -> dict:
         "mcp_brasil": "mcp_brasil",
     }
 
-    # Se o semantic router deu um resultado específico (não "web"), usa ele
-    if semantic_agent != "web":
+    # Se tiver sequencia multi-passo, usa o primeiro da lista
+    if agent_sequence:
+        next_agent = agent_sequence[0]
+        sequence_index = 0
+        print(f"   Proximo agente (multi-passo seq 0/{len(agent_sequence)-1}): {next_agent}")
+    elif semantic_agent != "web":
         next_agent = semantic_to_graph.get(semantic_agent, "web")
+        agent_sequence = [next_agent]
+        sequence_index = 0
         print(f"   Proximo agente (semantic router): {next_agent}")
     else:
         # Fallback para classificação LLM
-        next_agent = "codex" if category in ["CODE", "MULTI"] else (
-            "knowledge" if category == "KNOWLEDGE" else (
-                "scraper" if category == "SCRAPE" else (
-                    "viz" if category == "VIZ" else (
-                        "observer" if category == "OBSERVER" else (
-                            "vision_scout" if category == "VISION" else (
-                                "sheets" if category == "SHEETS" else (
-                                    "reporter" if category == "REPORT" else (
-                                        "dv360" if category == "DV360" else (
-                                            "research" if category == "RESEARCH" else
-                                            "tiktok" if category == "TIKTOK" else
-                                            "finance" if category == "FINANCE" else
-                                            "mcp_brasil" if category == "MCP_BRASIL" else "web"
+        next_agent = "codex" if category_primary in ["CODE", "MULTI"] else (
+            "knowledge" if category_primary == "KNOWLEDGE" else (
+                "scraper" if category_primary == "SCRAPE" else (
+                    "viz" if category_primary == "VIZ" else (
+                        "observer" if category_primary == "OBSERVER" else (
+                            "vision_scout" if category_primary == "VISION" else (
+                                "sheets" if category_primary == "SHEETS" else (
+                                    "reporter" if category_primary == "REPORT" else (
+                                        "dv360" if category_primary == "DV360" else (
+                                            "research" if category_primary == "RESEARCH" else
+                                            "tiktok" if category_primary == "TIKTOK" else
+                                            "finance" if category_primary == "FINANCE" else
+                                            "mcp_brasil" if category_primary == "MCP_BRASIL" else "web"
                                         )
                                     )
                                 )
@@ -408,12 +478,14 @@ def planner_node(state: AgentState) -> dict:
                 )
             )
         )
+        agent_sequence = [next_agent]
+        sequence_index = 0
         print(f"   Proximo agente (LLM fallback): {next_agent}")
 
     return {
         "context": {
             **state.get("context", {}),
-            "category": category,
+            "category": category_primary,
             "plan": steps,
             "current_step": 0,
             "semantic_analysis": {
@@ -425,9 +497,11 @@ def planner_node(state: AgentState) -> dict:
                 "annotations": semantic_annotations,
             }
         },
-    "current_agent": next_agent,
+        "current_agent": next_agent,
+        "agent_sequence": agent_sequence,
+        "sequence_index": sequence_index,
         "messages": [HumanMessage(content=f"Plano criado: {len(steps)} passos, "
-                                          f"semantic_agent={semantic_agent}, "
+                                          f"sequencia={agent_sequence}, "
                                           f"entidades={semantic_analysis['entities']}")],
         "turn_count": _increment_turn(state),
     }
@@ -1688,6 +1762,54 @@ def integrator_node(state: AgentState) -> dict:
         print(f"   ✓ Dados validados contra ontologia")
 
     if has_artifacts or has_messages or iteration >= 1:
+        # ====================================================================
+        # VERIFICA SE TEM PROXIMO PASSO NA SEQUENCIA MULTI-PASSO
+        # ====================================================================
+        agent_sequence = state.get("agent_sequence", [])
+        sequence_index = state.get("sequence_index", 0)
+        next_seq_index = sequence_index + 1
+
+        if agent_sequence and next_seq_index < len(agent_sequence):
+            # Ainda tem bridges para executar na sequencia
+            next_agent = agent_sequence[next_seq_index]
+            print(f"   [MULTI-PASSO] Avancando para bridge {next_seq_index+1}/{len(agent_sequence)}: {next_agent}")
+            print(f"   Artifacts ate agora: {len(artifacts)}")
+
+            # Auto-skill hook (parcial)
+            try:
+                from tools.auto_skill_creator import skill_suggestion_hook
+                objective = state.get("objective", "")
+                suggestion = skill_suggestion_hook(
+                    last_agent=last_agent,
+                    messages=messages,
+                    objective=objective,
+                    tool_calls_count=1,
+                )
+                if suggestion and suggestion.get("suggested"):
+                    print(f"   [SKILL HOOK] {suggestion['message']}")
+                    context["_skill_suggestion"] = suggestion
+            except ImportError:
+                pass
+            except Exception as e:
+                print(f"   [SKILL HOOK] Erro: {e}")
+
+            return {
+                "completed": False,
+                "success": True,
+                "current_agent": next_agent,
+                "sequence_index": next_seq_index,
+                "iteration": iteration + 1,
+                "context": {
+                    **context,
+                    "summary": f"Bridge {last_agent} concluida. Proximo: {next_agent}",
+                    "validation_errors": validation_errors if validation_errors else None,
+                },
+                "messages": [HumanMessage(content=f"INTEGRATOR: Bridge {last_agent} OK. Proximo: {next_agent}")]
+            }
+
+        # ====================================================================
+        # FIM DA SEQUENCIA — finaliza a tarefa
+        # ====================================================================
         print(f"   Tarefa concluida (artifacts={has_artifacts}, msgs={has_messages}, iter={iteration})\n")
 
         # ====================================================================
@@ -1757,7 +1879,12 @@ def router_node(state: AgentState):
         print(f"   [ROUTER] -> END (max iter {iteration})")
         return "end"
 
-    if len(state.get("artifacts", [])) > 0:
+    # Verifica se ainda tem sequencia pendente — nao encerra mesmo com artifacts
+    agent_sequence = state.get("agent_sequence", [])
+    sequence_index = state.get("sequence_index", 0)
+    if agent_sequence and (sequence_index + 1) < len(agent_sequence):
+        print(f"   [ROUTER] Sequencia pendente: {sequence_index+1}/{len(agent_sequence)} - continuando...")
+    elif len(state.get("artifacts", [])) > 0:
         print("   [ROUTER] -> END (has artifacts)")
         return "end"
 
