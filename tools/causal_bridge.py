@@ -558,11 +558,11 @@ class CausalBridge:
             else:
                 effect = effect_std
             
-            # Pega predições (counterfactual)
+            # Pega predições (counterfactual) — aplainar pra 1D
             pred = None
             if hasattr(result, 'post_pred') and hasattr(result, 'pre_pred'):
-                pre_pred = list(result.pre_pred)
-                post_pred = list(result.post_pred)
+                pre_pred = np.asarray(result.pre_pred).flatten().tolist()
+                post_pred = np.asarray(result.post_pred).flatten().tolist()
                 pred = pre_pred + post_pred
                 
                 # Back-transform das predições
@@ -575,18 +575,18 @@ class CausalBridge:
             # Plot
             if HAS_MATPLOTLIB:
                 fig, ax = plt.subplots(figsize=(12, 5))
-                time_col = "time" if "time" in df.columns else df.index
-                ax.plot(time_col, df["treated"], "k-", label="Treated", lw=2)
+                time_col = df["time"].values if "time" in df.columns else np.arange(len(df))
+                ax.plot(time_col, df["treated"].values, "k-", label="Treated", lw=2)
                 if pred:
-                    ax.plot(range(len(pred)), pred, "b--", label="Counterfactual", lw=2)
+                    ax.plot(time_col, pred, "b--", label="Counterfactual", lw=2)
                     
                     # Shading do intervalo pós-tratamento
-                    post_x = range(treatment_time, len(pred))
-                    post_treated = df["treated"].iloc[treatment_time:]
-                    post_pred_vals = pred[treatment_time:]
-                    ax.fill_between(post_x, 
-                                    [min(a,b) for a,b in zip(post_treated, post_pred_vals)],
-                                    [max(a,b) for a,b in zip(post_treated, post_pred_vals)],
+                    post_idx = np.where(np.arange(len(df)) >= treatment_time)[0]
+                    post_treated = df["treated"].values[post_idx]
+                    post_pred_vals = np.array(pred)[post_idx]
+                    lower = np.minimum(post_treated, post_pred_vals)
+                    upper = np.maximum(post_treated, post_pred_vals)
+                    ax.fill_between(time_col[post_idx], lower, upper,
                                     alpha=0.15, color="green", label="Lift")
                 
                 ax.axvline(x=treatment_time, color="r", ls="--", alpha=0.7, label="Intervention")
